@@ -1,0 +1,4 @@
+config.json
+service_account.json
+sync_state.json
+__pycache__/

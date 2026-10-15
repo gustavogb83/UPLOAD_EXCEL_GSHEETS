@@ -1,0 +1,13 @@
+{
+  "excel_path": "/path/to/CLA_contact_plan_orders_daily_forecasts_2026.xlsx",
+  "service_account_file": "service_account.json",
+  "lookback_days": 15,
+  "sheet_tab": "Daily",
+  "sheet_columns": {"date": "D", "orders": "I", "revenue": "J"},
+  "markets": {
+    "SE": "1m5JexdNq5zCeROquzbMUaZs-uGuTRMv5VyouHbWYLhM",
+    "NO": "1BiF6AqFMa7hvRl03BmahuYYzCEkLldkWyOFm1J3GoHc",
+    "DK": "1OH-dDO2I-GL88Y1-ES0RAUbIlVI5X9Y5vA3_J32yiMI",
+    "FI": "1ryWDIfXI_M5XmbXDnafrTfvGgwD2-cY1cl1m6KRJ56Q"
+  }
+}
