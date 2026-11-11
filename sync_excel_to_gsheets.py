@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Sync daily orders/revenue from the CLA Excel workbook to one Google Sheet per market.
 
-Run daily (cron / Task Scheduler). Only the last `lookback_days` days are written, matched by date
-on the Daily tab of each market's sheet. Safe to re-run: it only overwrites the order/revenue cells.
+Run on demand. Only the last `lookback_days` days are written, matched by date on the Daily tab of
+each market's sheet. A summary is shown and confirmation asked before anything is written.
+Safe to re-run: it only overwrites the order/revenue cells.
 """
 import argparse
 import hashlib
@@ -133,7 +134,8 @@ def sheet_date(v):
     return None
 
 
-def push_market(cfg, mk, data, dry_run):
+def plan_market(cfg, mk, data):
+    """Open the market's sheet and work out which cells would be written. Writes nothing."""
     import gspread
     gc = gspread.service_account(filename=cfg["service_account_file"])
     ws = gc.open_by_key(cfg["markets"][mk]).worksheet(cfg.get("sheet_tab", "Daily"))
@@ -144,30 +146,41 @@ def push_market(cfg, mk, data, dry_run):
         d = sheet_date(cell[0]) if cell else None
         if d:
             row_of.setdefault(d, i)
-    updates, missing = [], []
+    updates, missing, days = [], [], []
     for d, (rev, orders) in sorted(data.items()):
         row = row_of.get(d)
         if row is None:
             missing.append(d)
             continue
+        days.append(d)
         if orders is not None:
             updates.append({"range": f"{ocol}{row}", "values": [[orders]]})
         if rev is not None:
             updates.append({"range": f"{rcol}{row}", "values": [[rev]]})
-    log.info("%s: %d cells to write, %d dates not found in sheet %s", mk, len(updates), len(missing),
-             [d.isoformat() for d in missing] or "")
-    if updates and not dry_run:
-        ws.batch_update(updates, value_input_option="RAW")
-    elif dry_run:
-        for u in updates:
-            log.info("  [dry-run] %s %s = %s", mk, u["range"], u["values"][0][0])
-    return len(missing)
+    return {"ws": ws, "updates": updates, "days": days, "missing": missing}
+
+
+def describe(mk, plan):
+    days, missing = plan["days"], plan["missing"]
+    span = f"{days[0]} .. {days[-1]}" if days else "-"
+    line = f"  {mk}: {len(days)} days ({span}), {len(plan['updates'])} cells"
+    if missing:
+        line += f"  | {len(missing)} date(s) not in sheet, skipped: {[d.isoformat() for d in missing]}"
+    return line
+
+
+def confirm():
+    if not sys.stdin.isatty():
+        log.error("No interactive terminal to ask for confirmation; re-run with --yes to push anyway.")
+        return False
+    return input("Push these changes to Google Sheets? [y/N] ").strip().lower() in ("y", "yes")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="config.json")
-    p.add_argument("--dry-run", action="store_true", help="print what would be written")
+    p.add_argument("--dry-run", action="store_true", help="show every cell that would be written, write nothing")
+    p.add_argument("--yes", "-y", action="store_true", help="skip the confirmation prompt")
     p.add_argument("--force", action="store_true", help="sync even if the file is unchanged")
     p.add_argument("--from", dest="from_", help="backfill start date YYYY-MM-DD (default: today - lookback)")
     p.add_argument("--to", help="end date YYYY-MM-DD (default: today)")
@@ -192,16 +205,43 @@ def main():
         tmp = Path(td) / "snapshot.xlsx"
         shutil.copy2(src, tmp)
         data = read_excel(tmp, start, end)
-    log.info("Window %s..%s: %s", start, end, {mk: len(v) for mk, v in data.items()})
 
-    failures = 0
+    plans, failures = {}, 0
     for mk in MARKET_LABELS:
         try:
-            push_market(cfg, mk, data[mk], a.dry_run)
+            plans[mk] = plan_market(cfg, mk, data[mk])
         except Exception:
             log.exception("%s failed", mk)
             failures += 1
-    if not failures and not a.dry_run:
+
+    print(f"\nExcel: {src.name}   Window: {start} .. {end}")
+    for mk, plan in plans.items():
+        print(describe(mk, plan))
+        if a.dry_run:
+            for u in plan["updates"]:
+                print(f"      {u['range']} = {u['values'][0][0]}")
+    if failures:
+        print(f"\n{failures} market(s) could not be read (see errors above); nothing will be pushed.")
+        return 1
+    if a.dry_run:
+        print("\nDry run: nothing written.")
+        return 0
+    if not any(pl["updates"] for pl in plans.values()):
+        print("\nNothing to write.")
+        return 0
+    if not a.yes and not confirm():
+        print("Cancelled, nothing written.")
+        return 0
+
+    for mk, plan in plans.items():
+        if plan["updates"]:
+            try:
+                plan["ws"].batch_update(plan["updates"], value_input_option="RAW")
+                print(f"  {mk}: written")
+            except Exception:
+                log.exception("%s write failed", mk)
+                failures += 1
+    if not failures:
         state_file.write_text(json.dumps({"sha256": digest, "day": date.today().isoformat()}))
     return 1 if failures else 0
 
