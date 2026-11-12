@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Sync daily orders/revenue from the CLA Excel workbook to one Google Sheet per market.
 
-Run on demand. Only the last `lookback_days` days are written, matched by date on the Daily tab of
-each market's sheet. A summary is shown and confirmation asked before anything is written.
-Safe to re-run: it only overwrites the order/revenue cells.
+Run daily (cron / Task Scheduler). Only the last `lookback_days` days are written, matched by date
+on the Daily tab of each market's sheet. Safe to re-run: it only overwrites the order/revenue cells.
 """
 import argparse
 import hashlib
@@ -13,12 +12,19 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
 
 log = logging.getLogger("sync")
+HERE = Path(__file__).resolve().parent  # relative paths in the config are resolved against this folder
+
+
+def here(p):
+    p = Path(p)
+    return p if p.is_absolute() else HERE / p
 
 MONTHS = {m: i + 1 for i, m in enumerate(
     ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"])}
@@ -134,10 +140,14 @@ def sheet_date(v):
     return None
 
 
+def a1(col_letter, row):
+    return f"{col_letter}{row}"
+
+
 def plan_market(cfg, mk, data):
     """Open the market's sheet and work out which cells would be written. Writes nothing."""
     import gspread
-    gc = gspread.service_account(filename=cfg["service_account_file"])
+    gc = gspread.service_account(filename=str(here(cfg["service_account_file"])))
     ws = gc.open_by_key(cfg["markets"][mk]).worksheet(cfg.get("sheet_tab", "Daily"))
     dcol, ocol, rcol = (cfg["sheet_columns"][k] for k in ("date", "orders", "revenue"))
     dates = ws.get(f"{dcol}:{dcol}", value_render_option="UNFORMATTED_VALUE")
@@ -169,6 +179,24 @@ def describe(mk, plan):
     return line
 
 
+def snapshot(src, dest, tries=6, wait=5):
+    """Copy the Excel file, retrying: Excel or OneDrive can lock it for a few seconds."""
+    for i in range(1, tries + 1):
+        try:
+            shutil.copy2(src, dest)
+            return True
+        except FileNotFoundError:
+            log.error("Excel file not found: %s (check excel_path in config.json)", src)
+            return False
+        except OSError as e:
+            if i == tries:
+                log.error("Cannot read %s (%s). It is probably locked by Excel or OneDrive: close the "
+                          "workbook, wait for OneDrive to finish syncing, and run again.", src, e)
+                return False
+            log.warning("Excel file is locked (%s); retrying in %ds (%d/%d)...", e, wait, i, tries)
+            time.sleep(wait)
+
+
 def confirm():
     if not sys.stdin.isatty():
         log.error("No interactive terminal to ask for confirmation; re-run with --yes to push anyway.")
@@ -178,7 +206,7 @@ def confirm():
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="config.json")
+    p.add_argument("--config", default=str(HERE / "config.json"))
     p.add_argument("--dry-run", action="store_true", help="show every cell that would be written, write nothing")
     p.add_argument("--yes", "-y", action="store_true", help="skip the confirmation prompt")
     p.add_argument("--force", action="store_true", help="sync even if the file is unchanged")
@@ -192,18 +220,19 @@ def main():
     start = (datetime.strptime(a.from_, "%Y-%m-%d").date() if a.from_
              else end - timedelta(days=cfg.get("lookback_days", 15)))
 
-    src = Path(cfg["excel_path"])
-    state_file = Path(cfg.get("state_file", "sync_state.json"))
-    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    src = here(cfg["excel_path"])
+    state_file = here(cfg.get("state_file", "sync_state.json"))
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
-    if not a.force and not a.dry_run and not a.from_ and state.get("sha256") == digest \
-            and state.get("day") == date.today().isoformat():
-        log.info("File unchanged since today's last sync; nothing to do (use --force to override)")
-        return 0
 
     with tempfile.TemporaryDirectory() as td:  # work on a copy: the file may be open in Excel
         tmp = Path(td) / "snapshot.xlsx"
-        shutil.copy2(src, tmp)
+        if not snapshot(src, tmp):
+            return 1
+        digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
+        if not a.force and not a.dry_run and not a.from_ and state.get("sha256") == digest \
+                and state.get("day") == date.today().isoformat():
+            log.info("File unchanged since today's last sync; nothing to do (use --force to override)")
+            return 0
         data = read_excel(tmp, start, end)
 
     plans, failures = {}, 0

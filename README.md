@@ -7,14 +7,17 @@ Syncs daily **orders** and **revenue** from the CLA Excel workbook (monthly tabs
 - Column positions differ between months, so revenue/orders are located from the headers: row 2 = market (Sweden/Norway/Denmark/Finland), row 3 = `Real Revenue SEK|NOK|DKK|€` and `Real Orders`. SE/NO/DK revenue is in local currency, FI in €.
 - Only the last `lookback_days` (default 15) up to today are synced. Days with empty cells (future days) are skipped.
 - On the Google side only the orders (I) and revenue (J) cells of the matching date row (date in D) are written. Dates not found in the sheet are logged and skipped, never appended.
-- Works on a temp copy of the file, so it is safe while Excel has it open. Re-running is idempotent.
+- Works on a temp copy of the file, so it is safe while Excel has it open. If Excel or OneDrive has the file locked, the copy is retried for about 30 seconds before giving up with a clear message. Re-running is idempotent.
 - **Confirmation:** before writing, it prints a summary per market (days, date range, cells, skipped dates) and asks `[y/N]`. Nothing is written unless you answer `y`.
 
 ## Setup
-1. `pip install -r requirements.txt`
-2. Google Cloud: create a project, enable the **Google Sheets API**, create a **service account**, download its JSON key as `service_account.json` (keep it private, it is git-ignored).
+1. `pip install -r requirements.txt` (Python 3.9+)
+2. Google Cloud: create a project, enable the **Google Sheets API**, create a **service account**, download its JSON key as `service_account.json` (keep it private, it is git-ignored). Organizations may block key creation with the `iam.disableServiceAccountKeyCreation` policy; it can be overridden per project by an Organization Policy Administrator.
 3. Share each of the 4 Google Sheets with the service account email (`...@...iam.gserviceaccount.com`) as **Editor**. "Public" view access is not enough to write.
 4. `cp config.example.json config.json` and set `excel_path`.
+
+### Where the files live
+The script, `config.json`, `service_account.json` and the state file can sit in their own folder, separate from the Excel file. Relative paths in `config.json` are resolved against the script's folder, not the current directory. Use forward slashes (`D:/Reports/file.xlsx`) or a relative path such as `../file.xlsx` for `excel_path`. A leading slash on `service_account_file` (e.g. `/service_account.json`) points to the drive root on Windows, so don't use one.
 
 ## Run
 ```
